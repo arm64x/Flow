@@ -17,6 +17,11 @@ on:
         default: "com.facebook.Messenger"
         required: true
         type: string
+      remove_url_schemes:
+        description: "Remove URL Schemes from Info.plist"
+        default: false
+        required: false
+        type: boolean
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -35,7 +40,7 @@ jobs:
       - name: Hide sensitive inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: display_name,bundle_id
+          exclude_inputs: display_name,bundle_id,remove_url_schemes
       - name: Download and validate IPA
         run: |
           wget "${{ inputs.ipa_url }}" --no-verbose -O ${{ github.workspace }}/messenger.ipa
@@ -44,7 +49,7 @@ jobs:
             echo "::error::Validation failed: The downloaded file is not a valid IPA. Detected type: $file_type."
             exit 1
           fi
-      - name: Extract version from Info.plist
+      - name: Extract version and process Info.plist
         run: |
           echo "==> Extracting version from Info.plist..."
           
@@ -75,6 +80,42 @@ jobs:
           
           echo "Extracted version: $app_version"
           echo "APP_VERSION=$app_version" >> $GITHUB_ENV
+          
+          # Remove URL Schemes if requested
+          if [[ "${{ inputs.remove_url_schemes }}" == "true" ]]; then
+            echo "==> Removing URL Schemes from Info.plist..."
+            
+            # Check if CFBundleURLTypes exists
+            if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
+              echo "Found CFBundleURLTypes, removing..."
+              
+              # Backup original Info.plist
+              cp "$info_plist_path" "${info_plist_path}.backup"
+              
+              # Remove CFBundleURLTypes key
+              plutil -remove CFBundleURLTypes "$info_plist_path" 2>/dev/null || echo "CFBundleURLTypes not found or already removed"
+              
+              # Verify removal
+              if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
+                echo "⚠️ Warning: CFBundleURLTypes still exists after removal attempt"
+              else
+                echo "✅ Successfully removed CFBundleURLTypes from Info.plist"
+              fi
+              
+              # Recreate IPA with modified Info.plist
+              echo "==> Recreating IPA with modified Info.plist..."
+              zip -r -9 -q messenger_modified.ipa Payload/
+              
+              # Replace original IPA
+              mv messenger_modified.ipa "${{ github.workspace }}/messenger.ipa"
+              
+              echo "✅ IPA updated with modified Info.plist"
+            else
+              echo "ℹ️ No CFBundleURLTypes found in Info.plist"
+            fi
+          else
+            echo "==> Skipping URL Schemes removal (not requested)"
+          fi
           
           # Cleanup
           cd "${{ github.workspace }}"
@@ -160,6 +201,26 @@ jobs:
           else
             echo "⚠️ Final IPA contains $final_swift Swift library files"
             unzip -l Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)"
+          fi
+          
+          # Verify URL Schemes removal if requested
+          if [[ "${{ inputs.remove_url_schemes }}" == "true" ]]; then
+            echo "==> Verifying URL Schemes removal in final IPA..."
+            temp_verify=$(mktemp -d)
+            cd "$temp_verify"
+            unzip -q "${{ github.workspace }}/Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa"
+            info_plist_final=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
+            
+            if [[ -n "$info_plist_final" ]]; then
+              if plutil -extract CFBundleURLTypes raw "$info_plist_final" >/dev/null 2>&1; then
+                echo "⚠️ Warning: CFBundleURLTypes still exists in final IPA"
+              else
+                echo "✅ Final IPA confirmed: URL Schemes successfully removed"
+              fi
+            fi
+            
+            cd "${{ github.workspace }}"
+            rm -rf "$temp_verify"
           fi
       - uses: softprops/action-gh-release@v2.0.1
         with:
