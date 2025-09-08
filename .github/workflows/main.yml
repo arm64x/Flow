@@ -209,7 +209,7 @@ jobs:
             temp_verify=$(mktemp -d)
             cd "$temp_verify"
             unzip -q "${{ github.workspace }}/Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa"
-            info_plist_final=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
+            info_plist_final=$(find . -name "Info.plist" -path "*/Payload/*.app/Info.plist" -not -path "*/PlugIns/*" -not -path "*/Frameworks/*" | head -1)
             
             if [[ -n "$info_plist_final" ]]; then
               verification_passed=true
