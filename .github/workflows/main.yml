@@ -22,9 +22,11 @@ on:
         default: false
         required: false
         type: boolean
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 jobs:
   build:
     name: Build IPA
@@ -37,10 +39,12 @@ jobs:
         with:
           path: main
           submodules: recursive
+
       - name: Hide sensitive inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
           exclude_inputs: display_name,bundle_id,remove_url_schemes
+
       - name: Download and validate IPA
         run: |
           wget "${{ inputs.ipa_url }}" --no-verbose -O ${{ github.workspace }}/messenger.ipa
@@ -49,202 +53,137 @@ jobs:
             echo "::error::Validation failed: The downloaded file is not a valid IPA. Detected type: $file_type."
             exit 1
           fi
+
       - name: Extract version and process Info.plist
         run: |
           echo "==> Extracting version from Info.plist..."
-          
-          # Create temporary directory
+
           temp_dir=$(mktemp -d)
           cd "$temp_dir"
-          
-          # Extract IPA to get Info.plist
+
+          # Extract IPA
           unzip -q "${{ github.workspace }}/messenger.ipa"
-          
-          # Find Info.plist in the Payload directory
-          info_plist_path=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
-          
-          if [[ -z "$info_plist_path" ]]; then
-            echo "::error::Info.plist not found in IPA"
+
+          # Locate .app dir inside Payload
+          app_dir=$(find ./Payload -maxdepth 1 -name "*.app" -type d | head -1)
+          if [[ -z "$app_dir" ]]; then
+            echo "::error::.app directory not found in IPA"
             exit 1
           fi
-          
+
+          info_plist_path="$app_dir/Info.plist"
+          if [[ ! -f "$info_plist_path" ]]; then
+            echo "::error::Info.plist not found at $info_plist_path"
+            exit 1
+          fi
           echo "Found Info.plist at: $info_plist_path"
-          
-          # Extract version using plutil (available on macOS)
+
+          # Extract version
           app_version=$(plutil -extract CFBundleShortVersionString raw "$info_plist_path" 2>/dev/null || echo "")
-          
-          # If CFBundleShortVersionString is not available, try CFBundleVersion
           if [[ -z "$app_version" ]]; then
             app_version=$(plutil -extract CFBundleVersion raw "$info_plist_path" 2>/dev/null || echo "unknown")
           fi
-          
           echo "Extracted version: $app_version"
           echo "APP_VERSION=$app_version" >> $GITHUB_ENV
-          
+
           # Remove URL Schemes if requested
           if [[ "${{ inputs.remove_url_schemes }}" == "true" ]]; then
             echo "==> Removing URL Schemes from Info.plist..."
-            
-            # Check if CFBundleURLTypes exists
             if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
-              echo "Found CFBundleURLTypes, removing..."
-              
-              # Backup original Info.plist
-              cp "$info_plist_path" "${info_plist_path}.backup"
-              
-              # Remove CFBundleURLTypes key
-              plutil -remove CFBundleURLTypes "$info_plist_path" 2>/dev/null || echo "CFBundleURLTypes not found or already removed"
-              
-              # Verify removal
+              cp "$info_plist_path" "${info_plist_path}.bak"
+              plutil -remove CFBundleURLTypes "$info_plist_path" || true
               if plutil -extract CFBundleURLTypes raw "$info_plist_path" >/dev/null 2>&1; then
-                echo "⚠️ Warning: CFBundleURLTypes still exists after removal attempt"
+                echo "⚠️ CFBundleURLTypes still exists after removal attempt"
               else
-                echo "✅ Successfully removed CFBundleURLTypes from Info.plist"
+                echo "✅ Successfully removed CFBundleURLTypes"
               fi
-              
-              # Recreate IPA with modified Info.plist
-              echo "==> Recreating IPA with modified Info.plist..."
-              zip -r -9 -q messenger_modified.ipa Payload/
-              
-              # Replace original IPA
-              mv messenger_modified.ipa "${{ github.workspace }}/messenger.ipa"
-              
-              echo "✅ IPA updated with modified Info.plist"
             else
               echo "ℹ️ No CFBundleURLTypes found in Info.plist"
             fi
+
+            echo "==> Recreating IPA with modified Info.plist..."
+            zip -r -9 -q messenger_modified.ipa Payload/
+            mv messenger_modified.ipa "${{ github.workspace }}/messenger.ipa"
           else
-            echo "==> Skipping URL Schemes removal (not requested)"
+            echo "==> Skipping URL Schemes removal"
           fi
-          
-          # Cleanup
+
           cd "${{ github.workspace }}"
           rm -rf "$temp_dir"
+
       - name: Remove Swift Libraries from IPA
         run: |
-          echo "==> Checking for Swift libraries in IPA..."
-          
-          # Check if Swift libraries exist
+          echo "==> Checking for Swift libraries..."
           swift_files=$(unzip -l messenger.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
-          
           if [ "$swift_files" -gt 0 ]; then
-            echo "==> Found $swift_files Swift library files - Removing them..."
-            
-            # Create temporary directory
             temp_dir=$(mktemp -d)
             cd "$temp_dir"
-            
-            # Extract IPA
             unzip -q "${{ github.workspace }}/messenger.ipa"
-            
-            # Find and remove Swift libraries
-            find . -name "libswift_Concurrency.dylib" -type f -delete
-            find . -name "libswiftCore.dylib" -type f -delete
-            
-            # List what's in Frameworks after removal (for debugging)
-            echo "==> Frameworks directory contents after removal:"
-            find . -path "*/Frameworks/*" -name "*.dylib" | head -20
-            
-            # Recreate IPA
+            find . -name "libswift_Concurrency.dylib" -delete
+            find . -name "libswiftCore.dylib" -delete
             zip -r -9 -q messenger_cleaned.ipa Payload/
-            
-            # Replace original IPA
             mv messenger_cleaned.ipa "${{ github.workspace }}/messenger.ipa"
-            
-            # Verify removal
             cd "${{ github.workspace }}"
-            remaining_swift=$(unzip -l messenger.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
-            
-            if [ "$remaining_swift" -eq 0 ]; then
-              echo "✅ Successfully removed all Swift libraries"
-            else
-              echo "⚠️ Warning: $remaining_swift Swift library files still remain"
-            fi
-            
-            # Cleanup
             rm -rf "$temp_dir"
+            echo "✅ Swift libs removed"
           else
-            echo "✅ No Swift libraries found to remove"
+            echo "✅ No Swift libs found"
           fi
+
       - name: Install Dependencies
         run: brew install make ldid
+
       - name: Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
+
       - name: Install cyan
         run: pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+
       - name: Download Flow for Messenger
         id: download_flow
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           api_url="https://api.github.com/repos/dayanch96/Flow/releases/latest"
-          # Workaround
           curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$api_url" > /dev/null
           response=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$api_url")
           tag_name=$(echo "$response" | jq -r '.tag_name')
           deb_url=$(echo "$response" | jq -r '.assets[0].browser_download_url')
           if [[ "$deb_url" == "null" || -z "$deb_url" ]]; then
-            echo "::error::Failed to get tweak URL from Github API"
+            echo "::error::Failed to get tweak URL"
             exit 1
           fi
           echo "FLOW_TAG=$tag_name" >> $GITHUB_ENV
-          echo "Downloading: $deb_url"
           wget "$deb_url" --no-verbose -O ${{ github.workspace }}/flow_mess.deb
+
       - name: Inject tweaks into IPA
         run: cyan -i messenger.ipa -o Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa -uwef flow_mess.deb -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} -s
-      - name: Verify final IPA (Optional)
+
+      - name: Verify final IPA
         run: |
-          echo "==> Final verification of output IPA..."
-          final_swift=$(unzip -l Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)" | wc -l)
-          if [ "$final_swift" -eq 0 ]; then
-            echo "✅ Final IPA confirmed: No unwanted Swift libraries"
-          else
-            echo "⚠️ Final IPA contains $final_swift Swift library files"
-            unzip -l Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa | grep -E "(libswift_Concurrency\.dylib|libswiftCore\.dylib)"
-          fi
-          
-          # Verify URL Schemes removal if requested
+          echo "==> Final verification..."
           if [[ "${{ inputs.remove_url_schemes }}" == "true" ]]; then
-            echo "==> Verifying URL Schemes removal in final IPA..."
             temp_verify=$(mktemp -d)
             cd "$temp_verify"
             unzip -q "${{ github.workspace }}/Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa"
             app_dir_final=$(find ./Payload -maxdepth 1 -name "*.app" -type d | head -1)
             info_plist_final="$app_dir_final/Info.plist"
-            
-            if [[ -n "$info_plist_final" ]]; then
-              verification_passed=true
-              
-              # Check using plutil
-              if plutil -extract CFBundleURLTypes raw "$info_plist_final" >/dev/null 2>&1; then
-                verification_passed=false
-              fi
-              
-              # Check using grep
-              if grep -q "CFBundleURLTypes" "$info_plist_final" 2>/dev/null; then
-                verification_passed=false
-              fi
-              
-              if [[ "$verification_passed" == "true" ]]; then
-                echo "✅ Final IPA confirmed: URL Schemes successfully removed"
-              else
-                echo "⚠️ Warning: CFBundleURLTypes still exists in final IPA"
-                echo "Remaining content:"
-                grep -A 10 -B 2 "CFBundleURLTypes" "$info_plist_final" 2>/dev/null || echo "No grep matches"
-              fi
+            if plutil -extract CFBundleURLTypes raw "$info_plist_final" >/dev/null 2>&1; then
+              echo "⚠️ CFBundleURLTypes still exists"
             else
-              echo "⚠️ Could not find Info.plist in final IPA for verification"
+              echo "✅ URL Schemes successfully removed in final IPA"
             fi
-            
             cd "${{ github.workspace }}"
             rm -rf "$temp_verify"
           fi
+
       - uses: softprops/action-gh-release@v2.0.1
         with:
           tag_name: flow-mess-${{ env.FLOW_TAG }}
           name: Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}
           files: Messenger_${{ env.APP_VERSION }}_Flow_${{ env.FLOW_TAG }}.ipa
           draft: true
+
       - name: Output Release URL
         run: |
           echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases"
