@@ -212,11 +212,27 @@ jobs:
             info_plist_final=$(find . -name "Info.plist" -path "*/Payload/*" | head -1)
             
             if [[ -n "$info_plist_final" ]]; then
+              verification_passed=true
+              
+              # Check using plutil
               if plutil -extract CFBundleURLTypes raw "$info_plist_final" >/dev/null 2>&1; then
-                echo "⚠️ Warning: CFBundleURLTypes still exists in final IPA"
-              else
-                echo "✅ Final IPA confirmed: URL Schemes successfully removed"
+                verification_passed=false
               fi
+              
+              # Check using grep
+              if grep -q "CFBundleURLTypes" "$info_plist_final" 2>/dev/null; then
+                verification_passed=false
+              fi
+              
+              if [[ "$verification_passed" == "true" ]]; then
+                echo "✅ Final IPA confirmed: URL Schemes successfully removed"
+              else
+                echo "⚠️ Warning: CFBundleURLTypes still exists in final IPA"
+                echo "Remaining content:"
+                grep -A 10 -B 2 "CFBundleURLTypes" "$info_plist_final" 2>/dev/null || echo "No grep matches"
+              fi
+            else
+              echo "⚠️ Could not find Info.plist in final IPA for verification"
             fi
             
             cd "${{ github.workspace }}"
